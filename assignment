@@ -1,0 +1,188 @@
+STEP 1
+ 
+Dockerfile for deploying a simple Ruby on Rails application with PostgreSQL DB enabled:
+
+                                              
+                                                                                                                                                                                                             
+FROM ruby:2.7                                                      # Used  the official Ruby image
+ENV RAILS_ENV=production \                            # Set the  environment variables for the Rails app
+    RAILS_LOG_TO_STDOUT=true
+WORKDIR /app                     		                               # Set working directory
+RUN apt-get update -qq && \		                                # Install dependencies
+    apt-get install -y nodejs postgresql-client && \
+    rm -rf /var/lib/apt/lists/
+COPY Gemfile Gemfile.lock ./		                                          # Copy Gemfile and Gemfile.lock
+RUN gem install bundler && bundle install --jobs 20 --retry 5        # Install gems
+
+COPY . .                                           # Copy the Rails application into the container
+
+RUN bundle exec rake assets:precompile               # Precompile assets
+EXPOSE 3000                       # Expose port 3000 to the Docker host, so we can access the Rails app
+
+CMD ["bundle", "exec", "rails", "server", "-b", "0.0.0.0"]         # Start the Rails server
+
+
+PROSGRE-SQL DATABASE
+
+version: '3'
+
+services:
+  db:
+    image: postgres:latest
+    environment:
+      POSTGRES_DB: myapp_production
+      POSTGRES_USER: myapp_user
+      POSTGRES_PASSWORD: myapp_password
+    ports:
+      - "5432:5432"
+
+  web:
+    build: .
+    command: bundle exec rails s -p 3000 -b '0.0.0.0'
+    volumes:
+      - .:/app
+    ports:
+      - "3000:3000"
+    depends_on:
+      - db
+
+STEP 2
+
+Rails Application Deployment (rails-deployment.yaml)
+yaml
+Copy code
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rails-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: rails-app
+  template:
+    metadata:
+      labels:
+        app: rails-app
+    spec:
+      containers:
+      - name: rails-app
+        image: your-docker-image
+        ports:
+        - containerPort: 3000
+PostgreSQL StatefulSet (postgres-statefulset.yaml)
+yaml
+Copy code
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  serviceName: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+      - name: postgres
+        image: postgres:latest
+        ports:
+        - containerPort: 5432
+        env:
+        - name: POSTGRES_PASSWORD
+          value: your-password
+        volumeMounts:
+        - name: postgres-persistent-storage
+          mountPath: /var/lib/postgresql/data
+  volumeClaimTemplates:
+  - metadata:
+      name: postgres-persistent-storage
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      resources:
+        requests:
+          storage: 1Gi
+
+STEP 3 
+ARGOCD
+
+argocd-cm.yaml:
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-cm
+data:
+  repositories: |
+    - url: <private_github_repo_url>
+      username: <github_username>
+      password: <github_personal_access_token>
+
+argocd-rbac-cm.yaml:
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-rbac-cm
+data:
+  policy.csv: |
+    p, role:admin, applications/*, *, allow
+
+Application YAML
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: rails-app
+spec:
+  project: default
+  source:
+    repoURL: <private_github_repo_url>
+    targetRevision: HEAD
+    path: kubernetes
+  destination:
+    server: 'https://kubernetes.default.svc'
+    namespace: default
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+
+
+STEP 4
+tekton
+tekton-pipeline.yaml
+apiVersion: tekton.dev/v1beta1
+kind: Pipeline
+metadata:
+  name: build-and-push-pipeline
+spec:
+  tasks:
+  - name: build-and-push-task
+    taskRef:
+      name: build-and-push-task
+    params:
+    - name: image
+      value: your-docker-image
+
+
+tekton-task.yaml
+
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: build-and-push-task
+spec:
+  steps:
+  - name: build-and-push
+    image: gcr.io/tekton-releases/github.com/tektoncd/pipeline/cmd/creds-init@sha256:19a92c5d7d2b7945ccf708e1e051bd09168f8ef78d1fb81ec89b0e70256fb4e7
+    command:
+    - /ko-app/creds-init
+    - -namespace=your-namespace
+    - -service-account=your-service-account
+    - -container=kaniko-init
+    volumeMounts:
+    - name: docker-config
+      mountPath: /tekton/home/.docker
